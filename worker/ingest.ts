@@ -1,11 +1,11 @@
 import 'dotenv/config';
-import { ingestRepo, resolveSources } from '@/hub/rag/ingest';
+import { ingestRepo, prepareSources } from '@/hub/rag/ingest';
 import { prisma } from '@/lib/prisma';
 
 // CLI de ingestão RAG: `npm run ingest`.
 // Lê os repos configurados (RAG_LOCAL_WEB / RAG_LOCAL_MOBILE), reindexa tudo.
 async function main() {
-  let sources = resolveSources();
+  let sources = await prepareSources();
   // filtro opcional por nome: `npm run ingest -- mobile`  (casa "brevus-mobile")
   const filters = process.argv.slice(2);
   if (filters.length > 0) {

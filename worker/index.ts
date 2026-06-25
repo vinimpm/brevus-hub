@@ -3,7 +3,7 @@ import { Worker } from 'bullmq';
 import { connectionOptions, RUNS_QUEUE } from '@/hub/queue';
 import { runAgent, failRun } from '@/hub/orchestrator';
 import { deliverRunReport } from '@/delivery';
-import { ingestRepo, resolveSources } from '@/hub/rag/ingest';
+import { ingestRepo, prepareSources } from '@/hub/rag/ingest';
 import { prisma } from '@/lib/prisma';
 
 // Worker que consome a fila e processa dois tipos de job:
@@ -15,7 +15,7 @@ const worker = new Worker(
   async (job) => {
     if (job.name === 'ingest') {
       const filters = (job.data?.repos as string[] | undefined) ?? [];
-      let sources = resolveSources();
+      let sources = await prepareSources();
       if (filters.length) sources = sources.filter((s) => filters.some((f) => s.name.includes(f)));
       let total = 0;
       for (const src of sources) total += await ingestRepo(src);

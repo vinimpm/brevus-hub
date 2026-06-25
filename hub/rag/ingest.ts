@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { simpleGit } from 'simple-git';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
 import { embed, toVectorLiteral } from './embeddings';
@@ -130,12 +131,61 @@ export async function ingestRepo(src: RepoSource): Promise<number> {
   return all.length;
 }
 
-/** Resolve as fontes de repo a partir do ambiente (local em dev). */
+// Diretório de trabalho onde os repos são clonados em produção.
+function reposWorkDir(): string {
+  return process.env.RAG_WORK_DIR || path.resolve('./data/repos');
+}
+
+function repoUrl(name: string): string | undefined {
+  if (name === 'brevus') return process.env.RAG_REPO_WEB;
+  if (name === 'brevus-mobile') return process.env.RAG_REPO_MOBILE;
+  return undefined;
+}
+
+function localDir(name: string): string | undefined {
+  if (name === 'brevus') return process.env.RAG_LOCAL_WEB || undefined;
+  if (name === 'brevus-mobile') return process.env.RAG_LOCAL_MOBILE || undefined;
+  return undefined;
+}
+
+// Converte uma URL de repo (SSH ou HTTPS) em HTTPS com token (read-only).
+// Usa GIT_TOKEN (fine-grained PAT com leitura de Contents nos dois repos).
+function toHttpsAuth(url: string): string {
+  const token = process.env.GIT_TOKEN;
+  const m = url.match(/github\.com[:/]+([^/]+)\/(.+?)(?:\.git)?$/i);
+  if (!m) return url;
+  const [, owner, repo] = m;
+  if (token) return `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
+  return `https://github.com/${owner}/${repo}.git`; // repo público (sem token)
+}
+
+// Resolve as fontes (síncrono): usa cópia local (dev) ou o diretório de clone
+// determinístico (prod). É o que as tools read_file/secret_scan consultam.
 export function resolveSources(): RepoSource[] {
   const sources: RepoSource[] = [];
-  const web = process.env.RAG_LOCAL_WEB;
-  const mobile = process.env.RAG_LOCAL_MOBILE;
-  if (web) sources.push({ name: 'brevus', dir: web });
-  if (mobile) sources.push({ name: 'brevus-mobile', dir: mobile });
+  for (const name of ['brevus', 'brevus-mobile']) {
+    const local = localDir(name);
+    if (local) {
+      sources.push({ name, dir: local });
+    } else if (repoUrl(name)) {
+      sources.push({ name, dir: path.join(reposWorkDir(), name) });
+    }
+  }
+  return sources;
+}
+
+// Garante que cada fonte está disponível em disco: em dev usa a cópia local;
+// em prod faz um clone raso (read-only) do repo. Chamar antes de ingerir.
+export async function prepareSources(): Promise<RepoSource[]> {
+  const sources = resolveSources();
+  for (const s of sources) {
+    if (localDir(s.name)) continue; // dev: cópia local já está em disco
+    const url = repoUrl(s.name);
+    if (!url) continue;
+    console.log(`[ingest] clonando ${s.name} (read-only)…`);
+    await fs.rm(s.dir, { recursive: true, force: true });
+    await fs.mkdir(path.dirname(s.dir), { recursive: true });
+    await simpleGit().clone(toHttpsAuth(url), s.dir, ['--depth', '1', '--single-branch']);
+  }
   return sources;
 }
