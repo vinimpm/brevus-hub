@@ -1,0 +1,184 @@
+// Brevus Agent Hub — schema do banco DEDICADO (NUNCA o de produção).
+// Postgres + pgvector. Guarda: a árvore de agentes (organograma), execuções,
+// findings e a memória compartilhada (knowledge base + RAG).
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("HUB_DATABASE_URL")
+  extensions = [vector]
+}
+
+// ---------------------------------------------------------------------------
+// Organograma: cada Agent é um nó; parentId forma a árvore
+// (Orquestrador → Departamentos → Sub-agentes).
+// ---------------------------------------------------------------------------
+model Agent {
+  id           String   @id @default(cuid())
+  parentId     String?
+  parent       Agent?   @relation("AgentTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children     Agent[]  @relation("AgentTree")
+
+  slug         String   @unique
+  name         String
+  role         String   @db.Text // system prompt / função
+  model        String   @default("claude-sonnet-4-6")
+  allowedTools String[] @default([]) // slugs do tool-registry
+  schedule     String   @default("manual") // manual | daily | weekly | cron expr
+  outputFormat String   @default("markdown")
+  enabled      Boolean  @default(true)
+  // Posição no canvas do organograma (React Flow); persistida ao arrastar.
+  posX         Float    @default(0)
+  posY         Float    @default(0)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  runs         Run[]
+  findings     Finding[]
+  knowledge    KnowledgeItem[]
+
+  @@index([parentId])
+  @@map("agents")
+}
+
+enum RunStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELED
+}
+
+model Run {
+  id          String    @id @default(cuid())
+  agentId     String
+  agent       Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  status      RunStatus @default(QUEUED)
+  trigger     String    @default("manual") // manual | cron | parent-delegation
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  inputTokens Int       @default(0)
+  outputTokens Int      @default(0)
+  costUsd     Float     @default(0)
+  error       String?   @db.Text
+  log         String?   @db.Text // transcript resumido / passos
+
+  createdAt   DateTime  @default(now())
+
+  findings    Finding[]
+
+  @@index([agentId])
+  @@index([status])
+  @@map("runs")
+}
+
+enum Severity {
+  INFO
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum FindingStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+  DISMISSED
+}
+
+// Resultado acionável produzido por um agente (vuln, insight de marketing, etc.).
+model Finding {
+  id        String        @id @default(cuid())
+  runId     String?
+  run       Run?          @relation(fields: [runId], references: [id], onDelete: SetNull)
+  agentId   String
+  agent     Agent         @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  type      String        // "vulnerability" | "insight" | "competitor" | ...
+  severity  Severity?
+  title     String
+  body      String        @db.Text // markdown
+  refs      String[]      @default([]) // "repo:path" ou URLs
+  status    FindingStatus @default(OPEN)
+  // hash do conteúdo p/ dedupe entre runs
+  dedupeKey String?
+
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  sources   Source[]
+
+  @@index([agentId])
+  @@index([status])
+  @@index([dedupeKey])
+  @@map("findings")
+}
+
+// Fonte citada (rastreabilidade): arquivo de código ou URL externa.
+model Source {
+  id        String   @id @default(cuid())
+  findingId String
+  finding   Finding  @relation(fields: [findingId], references: [id], onDelete: Cascade)
+  kind      String   // "code" | "url"
+  ref       String   // "repo:path#L10-L20" ou URL
+  title     String?
+  createdAt DateTime @default(now())
+
+  @@index([findingId])
+  @@map("sources")
+}
+
+// ---------------------------------------------------------------------------
+// Memória compartilhada ("o hub"): fatos que um agente publica para os outros.
+// ---------------------------------------------------------------------------
+model KnowledgeItem {
+  id          String                @id @default(cuid())
+  agentId     String?
+  agent       Agent?                @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  topic       String
+  content     String                @db.Text
+  // embedding p/ busca semântica (dimensão do modelo self-hosted; 384 = MiniLM-L6)
+  embedding   Unsupported("vector(384)")?
+  version     Int                   @default(1)
+  createdAt   DateTime              @default(now())
+
+  @@index([agentId])
+  @@map("knowledge_items")
+}
+
+// ---------------------------------------------------------------------------
+// RAG: chunks do código/docs indexados (read-only). Embeddings self-hosted.
+// ---------------------------------------------------------------------------
+model CodeChunk {
+  id         String                       @id @default(cuid())
+  repo       String                       // "brevus" | "brevus-mobile"
+  path       String
+  symbol     String?
+  startLine  Int?
+  endLine    Int?
+  content    String                       @db.Text
+  commit     String?
+  embedding  Unsupported("vector(384)")?
+  createdAt  DateTime                     @default(now())
+
+  @@index([repo])
+  @@index([path])
+  @@map("code_chunks")
+}
+
+// Marca a última ingestão por repo (p/ ingestão incremental).
+model IngestionState {
+  repo        String   @id
+  lastCommit  String?
+  lastRunAt   DateTime?
+  chunkCount  Int      @default(0)
+  updatedAt   DateTime @updatedAt
+
+  @@map("ingestion_state")
+}

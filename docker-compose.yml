@@ -1,0 +1,25 @@
+version: '3.8'
+
+# Infra LOCAL de desenvolvimento do hub. Em produção, use os plugins do Railway.
+# Postgres com pgvector embutido + Redis para a fila (BullMQ).
+services:
+  hub-postgres:
+    image: pgvector/pgvector:pg16
+    container_name: brevus_hub_postgres
+    environment:
+      POSTGRES_USER: brevus_hub
+      POSTGRES_PASSWORD: hub123
+      POSTGRES_DB: brevus_hub
+    ports:
+      - '5433:5432'
+    volumes:
+      - hub_pg_data:/var/lib/postgresql/data
+
+  hub-redis:
+    image: redis:7-alpine
+    container_name: brevus_hub_redis
+    ports:
+      - '6379:6379'
+
+volumes:
+  hub_pg_data:
